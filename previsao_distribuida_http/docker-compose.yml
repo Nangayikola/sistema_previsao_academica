@@ -1,0 +1,13 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: previsao_broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - academic-net
+
+networks:
+  academic-net:
+    driver: bridge

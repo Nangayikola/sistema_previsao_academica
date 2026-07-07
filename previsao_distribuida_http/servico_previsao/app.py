@@ -1,95 +1,131 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import declarative_base, sessionmaker
+import json
+import sqlite3
+import pika
+import time
+import os
+from datetime import datetime  # <-- importação adicionada
 
-DATABASE_URL = "sqlite+aiosqlite:///./previsao.db"
+# ---- Caminho absoluto para o ficheiro central.db na raiz do projeto ----
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = r"C:\Users\felis\OneDrive\Documentos\GitHub\sistema_previsao_academica\previsao_distribuida_http\central.db"
+print(f"📂 Serviço de Previsão a usar: {DB_PATH}")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
-Base = declarative_base()
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-class Previsao(Base):
-    __tablename__ = "previsoes"
-    id = sa.Column(sa.Integer, primary_key=True)
-    matricula = sa.Column(sa.String)
-    disciplina_codigo = sa.Column(sa.String)
-    risco = sa.Column(sa.String)
-    media_estimada = sa.Column(sa.Float)
-    recomendacao = sa.Column(sa.String)
-
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-app = FastAPI()
-
-class NotaInput(BaseModel):
-    disciplina_codigo: str
-    nota: float
-    faltas: int = 0
-    data: str
-
-class DadosAluno(BaseModel):
-    matricula: str
-    nome: str
-    notas: List[NotaInput]
-
-def calcular_risco(notas: List[float], faltas: int = 0, total_aulas: int = 40) -> tuple:
+def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
     if not notas:
         return "alto", 0.0, "Sem notas registadas."
     media = sum(notas) / len(notas)
     perc_faltas = faltas / total_aulas if total_aulas > 0 else 0
-    
     if media < 5.0 or perc_faltas > 0.25:
-        risco = "alto"
-        rec = "Procurar monitoria e regularizar faltas imediatamente."
+        return "alto", round(media, 2), "Procurar monitoria e regularizar faltas imediatamente."
     elif media < 6.5:
-        risco = "medio"
-        rec = "Dedicar estudo extra e evitar faltas."
+        return "medio", round(media, 2), "Dedicar estudo extra e evitar faltas."
     else:
-        risco = "baixo"
-        rec = "Parabéns! Continue assim."
-    
-    return risco, round(media, 2), rec
+        return "baixo", round(media, 2), "Parabéns! Continue assim."
 
-@app.post("/prever")
-async def prever_risco(dados: DadosAluno):
-    # Agrupa notas e faltas por disciplina
-    notas_por_disciplina = {}
-    faltas_por_disciplina = {}
-    
-    for nota in dados.notas:
-        # Captura faltas (considera o valor da primeira ocorrência por disciplina)
-        if nota.disciplina_codigo not in faltas_por_disciplina:
-            faltas_por_disciplina[nota.disciplina_codigo] = nota.faltas
-        # Agrupa notas
-        notas_por_disciplina.setdefault(nota.disciplina_codigo, []).append(nota.nota)
+RABBIT_HOST = "localhost"
 
-    resultados = []
-    async with AsyncSessionLocal() as session:
-        for disc_cod, lista_notas in notas_por_disciplina.items():
-            faltas = faltas_por_disciplina.get(disc_cod, 0)
-            risco, media, rec = calcular_risco(lista_notas, faltas)
-            previsao = Previsao(
-                matricula=dados.matricula,
-                disciplina_codigo=disc_cod,
-                risco=risco,
-                media_estimada=media,
-                recomendacao=rec
+def processar_mensagem_sync(body):
+    try:
+        data = json.loads(body)
+        matricula = data["matricula"]
+        disciplinas = data["disciplinas"]
+        print(f"📩 Processando {matricula} (síncrono)")
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        for disc in disciplinas:
+            codigo = disc["codigo"]
+            cursor.execute(
+                "SELECT nota, faltas FROM notas WHERE aluno_matricula = ? AND disciplina_codigo = ? ORDER BY data_avaliacao",
+                (matricula, codigo)
             )
-            session.add(previsao)
-            resultados.append({
-                "disciplina": disc_cod,
-                "risco": risco,
-                "media_estimada": media,
-                "recomendacao": rec
-            })
-        await session.commit()
-    return {"resultados": resultados}
+            rows = cursor.fetchall()
+            notas = [r[0] for r in rows]
+            faltas = rows[0][1] if rows else 0
+            print(f"📊 Notas para {codigo}: {notas}, faltas: {faltas}")
+            risco, media_est, rec = calcular_risco(notas, faltas)
+            
+            # Gera a data/hora atual no formato ISO (ex: 2025-06-24T15:30:00)
+            data_calculo = datetime.now().isoformat()
+            
+            # Inclui a coluna data_calculo no INSERT
+            cursor.execute(
+                """INSERT INTO previsoes 
+                   (aluno_matricula, disciplina_codigo, risco, media_estimada, recomendacao, data_calculo) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (matricula, codigo, risco, media_est, rec, data_calculo)
+            )
+            print(f"✅ Previsão inserida para {matricula} - {codigo}: {risco} (data: {data_calculo})")
+        conn.commit()
+        conn.close()
+        print(f"✅ Todas as previsões guardadas para {matricula}")
+    except Exception as e:
+        print(f"❌ Erro ao processar: {e}")
+        import traceback
+        traceback.print_exc()
 
-@app.on_event("startup")
-async def startup():
-    await init_db()
+def callback(ch, method, properties, body):
+    print("📨 Mensagem recebida!")
+    processar_mensagem_sync(body)
+
+def iniciar_consumidor():
+    # Criar tabelas se não existirem no DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS notas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aluno_matricula TEXT,
+            disciplina_codigo TEXT,
+            nota REAL,
+            faltas INTEGER,
+            data_avaliacao TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS previsoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aluno_matricula TEXT,
+            disciplina_codigo TEXT,
+            risco TEXT,
+            media_estimada REAL,
+            recomendacao TEXT,
+            data_calculo TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print(f"✅ Tabelas criadas/verificadas em {DB_PATH}")
+
+    while True:
+        try:
+            print("🔗 A conectar ao RabbitMQ...")
+            params = pika.ConnectionParameters(
+                host=RABBIT_HOST,
+                heartbeat=60,
+                blocked_connection_timeout=300,
+                connection_attempts=10,
+                retry_delay=5
+            )
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            channel.queue_declare(queue='previsao_queue', durable=True)
+            channel.basic_consume(queue='previsao_queue', on_message_callback=callback, auto_ack=True)
+            print("🔮 Serviço de Previsão aguardando mensagens...")
+            channel.start_consuming()
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError, pika.exceptions.StreamLostError) as e:
+            print(f"❌ Erro na conexão: {e}")
+            print("🔄 A reconectar em 10 segundos...")
+            time.sleep(10)
+            continue
+        except KeyboardInterrupt:
+            print("👋 Encerrando...")
+            break
+        except Exception as e:
+            print(f"❌ Erro inesperado: {e}")
+            time.sleep(10)
+            continue
+
+if __name__ == "__main__":
+    iniciar_consumidor()
