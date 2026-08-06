@@ -7,23 +7,25 @@ from datetime import datetime
 
 # ---- Caminho absoluto para o ficheiro central.db na raiz do projeto ----
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = r"C:\Users\felis\OneDrive\Documentos\GitHub\sistema_previsao_academica\previsao_distribuida_http\central.db"
+DB_PATH = os.path.join(BASE_DIR, "central.db")
 print(f"📂 Serviço de Previsão a usar: {DB_PATH}")
 
+# ============================================================================
+# FUNÇÃO DE CÁLCULO DE RISCO (mantida)
+# ============================================================================
 def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
     """
     Calcula o risco de reprovação com base nas notas e faltas.
     Retorna: (risco, media_estimada, recomendacao_detalhada)
     """
     if not notas:
-        return ("alto", 0.0, 
+        return ("alto", 0.0,
                 "⚠️ Sem notas registadas. Recomenda-se que o aluno comece a registar o seu desempenho "
                 "o mais rapidamente possível e procure apoio pedagógico para não ficar em situação de risco.")
 
     media = sum(notas) / len(notas)
     perc_faltas = faltas / total_aulas if total_aulas > 0 else 0
 
-    # ---- RISCO ALTO ----
     if media < 5.0 or perc_faltas > 0.25:
         risco = "alto"
         recomendacao = (
@@ -42,7 +44,6 @@ def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
         )
         return risco, round(media, 2), recomendacao
 
-    # ---- RISCO MÉDIO ----
     if media < 6.5:
         risco = "medio"
         recomendacao = (
@@ -60,7 +61,6 @@ def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
         )
         return risco, round(media, 2), recomendacao
 
-    # ---- RISCO BAIXO ----
     else:
         risco = "baixo"
         recomendacao = (
@@ -78,80 +78,207 @@ def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
         )
         return risco, round(media, 2), recomendacao
 
-RABBIT_HOST = "localhost"
-
+# ============================================================================
+# PROCESSAMENTO DA MENSAGEM
+# ============================================================================
 def processar_mensagem_sync(body):
     try:
         data = json.loads(body)
-        matricula = data["matricula"]
-        disciplinas = data["disciplinas"]
-        print(f"📩 Processando {matricula} (síncrono)")
+        aluno_id = data.get("aluno_id")
+        matricula = data.get("matricula")
+        semestre = data.get("semestre")
+        disciplinas = data.get("disciplinas", [])
+        print(f"📩 Processando {matricula} - semestre {semestre}")
+
+        if not aluno_id or not semestre or not disciplinas:
+            print("❌ Mensagem inválida: faltam campos obrigatórios")
+            return
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
+        # --- 1. Calcular previsões por disciplina ---
+        disciplinas_processadas = []
+        total_notas = 0
+        total_faltas = 0
+        count_disciplinas = 0
+        disciplinas_em_risco = 0
+
         for disc in disciplinas:
             codigo = disc["codigo"]
-            cursor.execute(
-                "SELECT nota, faltas FROM notas WHERE aluno_matricula = ? AND disciplina_codigo = ? ORDER BY data_avaliacao",
-                (matricula, codigo)
-            )
+            # Busca o ID da disciplina
+            cursor.execute("SELECT id FROM disciplinas WHERE codigo = ?", (codigo,))
+            row_disc = cursor.fetchone()
+            if not row_disc:
+                print(f"⚠️ Disciplina {codigo} não encontrada. A ignorar.")
+                continue
+            disciplina_id = row_disc[0]
+
+            # Busca todas as notas do aluno na disciplina e semestre
+            cursor.execute("""
+                SELECT nota, faltas FROM notas
+                WHERE aluno_id = ? AND disciplina_id = ? AND semestre = ?
+                ORDER BY data_avaliacao
+            """, (aluno_id, disciplina_id, semestre))
             rows = cursor.fetchall()
             notas = [r[0] for r in rows]
             faltas = rows[0][1] if rows else 0
-            print(f"📊 Notas para {codigo}: {notas}, faltas: {faltas}")
+            media = sum(notas) / len(notas) if notas else 0
+            print(f"📊 {codigo}: notas={notas}, faltas={faltas}, média={media:.2f}")
 
+            # Calcula risco individual
             risco, media_est, recomendacao = calcular_risco(notas, faltas)
             data_calculo = datetime.now().isoformat()
 
-            cursor.execute(
-                """INSERT INTO previsoes 
-                   (aluno_matricula, disciplina_codigo, risco, media_estimada, recomendacao, data_calculo) 
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (matricula, codigo, risco, media_est, recomendacao, data_calculo)
-            )
-            print(f"✅ Previsão inserida para {matricula} - {codigo}: {risco} (data: {data_calculo})")
+            # Guarda a previsão individual
+            cursor.execute("""
+                INSERT OR REPLACE INTO previsoes
+                (aluno_id, disciplina_id, semestre, risco, media_estimada, recomendacao, data_calculo)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (aluno_id, disciplina_id, semestre, risco, media_est, recomendacao, data_calculo))
+
+            # Acumula para o agregado
+            total_notas += media
+            total_faltas += faltas
+            count_disciplinas += 1
+            if risco in ("alto", "medio"):
+                disciplinas_em_risco += 1
+
+            disciplinas_processadas.append(codigo)
+            print(f"✅ Previsão individual guardada para {matricula} - {codigo}: {risco}")
+
+        # --- 2. Calcular previsão agregada do semestre ---
+        if count_disciplinas > 0:
+            media_global = total_notas / count_disciplinas
+            # Define risco global
+            if disciplinas_em_risco >= 2:
+                risco_global = "alto"
+                recomendacao_geral = (
+                    f"🔴 **Risco Global Alto** – {disciplinas_em_risco} disciplinas em risco.\n"
+                    "Recomenda-se intervenção imediata: priorize as disciplinas com risco alto, "
+                    "procure monitoria e reduza faltas. Consulte o plano de ação individual para cada disciplina."
+                )
+            elif disciplinas_em_risco == 1:
+                risco_global = "medio"
+                recomendacao_geral = (
+                    f"🟡 **Risco Global Médio** – 1 disciplina em risco.\n"
+                    "Dedique atenção extra a essa disciplina e mantenha o bom desempenho nas restantes. "
+                    "Evite faltas e acompanhe as monitorias disponíveis."
+                )
+            else:
+                risco_global = "baixo"
+                recomendacao_geral = (
+                    f"🟢 **Risco Global Baixo** – Nenhuma disciplina em risco.\n"
+                    "Continue com o bom desempenho. Aproveite para aprofundar conhecimentos e ajudar colegas."
+                )
+
+            # Guarda previsão agregada
+            cursor.execute("""
+                INSERT OR REPLACE INTO previsoes_semestre
+                (aluno_id, semestre, media_global, total_faltas, disciplinas_em_risco, risco_global, recomendacao_geral, data_calculo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (aluno_id, semestre, round(media_global, 2), total_faltas, disciplinas_em_risco,
+                  risco_global, recomendacao_geral, datetime.now().isoformat()))
+
+            print(f"✅ Previsão agregada guardada para {matricula} - {semestre}: {risco_global}")
+
         conn.commit()
         conn.close()
-        print(f"✅ Todas as previsões guardadas para {matricula}")
+        print(f"✅ Processamento completo para {matricula} - {semestre}")
+
     except Exception as e:
         print(f"❌ Erro ao processar: {e}")
         import traceback
         traceback.print_exc()
 
+# ============================================================================
+# CONSUMIDOR RABBITMQ
+# ============================================================================
 def callback(ch, method, properties, body):
     print("📨 Mensagem recebida!")
     processar_mensagem_sync(body)
 
 def iniciar_consumidor():
-    # Criar tabelas se não existirem no DB_PATH
+    # Verifica/cria tabelas necessárias
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Tabela de utilizadores (se não existir, mas já deve existir)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            nome TEXT NOT NULL,
+            email TEXT UNIQUE
+        )
+    ''')
+
+    # Tabela de disciplinas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS disciplinas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT UNIQUE NOT NULL,
+            nome TEXT NOT NULL,
+            semestre TEXT NOT NULL,
+            creditos INTEGER DEFAULT 0
+        )
+    ''')
+
+    # Tabela de notas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS notas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            aluno_matricula TEXT,
-            disciplina_codigo TEXT,
+            aluno_id INTEGER,
+            disciplina_id INTEGER,
             nota REAL,
-            faltas INTEGER,
-            data_avaliacao TEXT
+            faltas INTEGER DEFAULT 0,
+            semestre TEXT NOT NULL,
+            data_avaliacao TEXT,
+            FOREIGN KEY(aluno_id) REFERENCES users(id),
+            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id)
         )
     ''')
+
+    # Tabela de previsões individuais
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS previsoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            aluno_matricula TEXT,
-            disciplina_codigo TEXT,
+            aluno_id INTEGER,
+            disciplina_id INTEGER,
+            semestre TEXT NOT NULL,
             risco TEXT,
             media_estimada REAL,
             recomendacao TEXT,
-            data_calculo TEXT
+            data_calculo TEXT,
+            FOREIGN KEY(aluno_id) REFERENCES users(id),
+            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id)
         )
     ''')
+
+    # Tabela de previsões agregadas por semestre
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS previsoes_semestre (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aluno_id INTEGER,
+            semestre TEXT NOT NULL,
+            media_global REAL,
+            total_faltas INTEGER,
+            disciplinas_em_risco INTEGER,
+            risco_global TEXT,
+            recomendacao_geral TEXT,
+            data_calculo TEXT,
+            FOREIGN KEY(aluno_id) REFERENCES users(id)
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print(f"✅ Tabelas criadas/verificadas em {DB_PATH}")
 
+    # Loop de consumo com reconexão automática
+    RABBIT_HOST = "localhost"
     while True:
         try:
             print("🔗 A conectar ao RabbitMQ...")
