@@ -341,11 +341,9 @@ async def boletim_semestre(semestre: str, current_user: User = Depends(get_curre
         
         return {"semestre": semestre, "disciplinas": disciplinas_data, "resumo": resumo}
 
-# ---- Endpoints legados (mantidos para compatibilidade, mas podem ser descontinuados) ----
+# ---- Endpoints legados e consultas ----
 @app.post("/aluno/dados")
 async def receber_dados_legado(dados: DadosAluno, professor: User = Depends(get_current_professor)):
-    # Adapta para o novo modelo (sem semestre, usa semestre default)
-    # Vamos manter apenas para não quebrar testes antigos
     return {"status": "descontinuado", "message": "Use /aluno/semestre"}
 
 @app.get("/alunos")
@@ -357,14 +355,32 @@ async def listar_alunos(current_user: User = Depends(get_current_user)):
         alunos = result.scalars().all()
         return [{"id": a.id, "username": a.username, "nome": a.nome} for a in alunos]
 
+# ---------- NOVO ENDPOINT: LISTAR DISCIPLINAS ----------
+@app.get("/disciplinas")
+async def listar_disciplinas(current_user: User = Depends(get_current_user)):
+    """
+    Lista todas as disciplinas registadas.
+    Requer autenticação (qualquer utilizador com token válido).
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(sa.select(Disciplina))
+        disciplinas = result.scalars().all()
+        return [
+            {
+                "codigo": d.codigo,
+                "nome": d.nome,
+                "semestre": d.semestre,
+                "creditos": d.creditos
+            }
+            for d in disciplinas
+        ]
+
 @app.get("/notas/{matricula}")
 async def listar_notas_legado(matricula: str, current_user: User = Depends(get_current_user)):
-    # Legado, pode ser removido ou adaptado
     return {"message": "Endpoint legado. Use /aluno/boletim/{semestre}?matricula=..."}
 
 @app.get("/previsoes/{matricula}")
 async def listar_previsoes_legado(matricula: str, current_user: User = Depends(get_current_user)):
-    # Legado
     return {"message": "Endpoint legado. Use /aluno/boletim/{semestre}?matricula=..."}
 
 # ---- Inicialização da base de dados ----
