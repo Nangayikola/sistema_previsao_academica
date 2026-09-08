@@ -1,73 +1,85 @@
-Sistema de Previsão Académica
+# 🎓 Sistema de Previsão Académica
 
-Descrição: Sistema distribuído para prever o risco de reprovação e o baixo desempenho de alunos com base em notas e faltas, auxiliando instituições de ensino na tomada de decisão pedagógica. Oferece recomendações personalizadas de estudo e sugere áreas de carreira com base nas aptidões reais do estudante. Com autenticação JWT, o sistema distingue professores (que registam semestres e consultam todos os alunos) e estudantes (que apenas consultam o seu próprio boletim). Cada semestre é composto por 6 disciplinas, com previsão individual por disciplina e uma previsão agregada do semestre.
+## 📌 Descrição
+O **Sistema de Previsão Académica** é uma plataforma distribuída concebida para prever o risco de reprovação e o baixo desempenho de alunos com base nas suas notas e faltas, auxiliando as instituições de ensino na tomada de decisões pedagógicas preventivas. 
 
-Tecnologias:
+O sistema oferece recomendações personalizadas de estudo e sugere áreas de carreira alinhadas com as aptidões reais do estudante. Com suporte a autenticação via JWT, a plataforma distingue os perfis de acesso:
+* **Professores:** Permite o registo de semestres, atribuição de notas/faltas e consulta de relatórios de todos os alunos.
+* **Estudantes:** Permite o acesso e consulta exclusiva ao seu próprio boletim e diagnósticos preditivos.
 
-Backend (API): Python + FastAPI + Uvicorn
+Cada semestre é composto por 6 disciplinas, contando com previsão individualizada por disciplina e uma previsão global agregada para o semestre.
 
-Interface: Streamlit (dashboard interativo)
+---
 
-Comunicação assíncrona: RabbitMQ (message broker)
+## 🛠️ Tecnologias Utilizadas
 
-Banco de dados: SQLite (centralizado)
+* **Backend (API):** Python + FastAPI + Uvicorn
+* **Interface do Utilizador:** Streamlit (Dashboard Interativo)
+* **Comunicação Assíncrona:** RabbitMQ (Message Broker)
+* **Cliente RabbitMQ:** Pika
+* **Banco de Dados & ORM:** SQLite (Centralizado) + SQLAlchemy + aiosqlite
+* **Autenticação e Segurança:** JWT (JSON Web Tokens) + bcrypt
+* **Containerização:** Docker + Docker Compose
 
-Cliente RabbitMQ: Pika
+---
 
-ORM: SQLAlchemy + aiosqlite
+## 📁 Estrutura do Projeto
 
-Containerização: Docker + Docker Compose
-
-Autenticação: JWT + bcrypt
-
-Estrutura do projeto:
-
+```text
 previsao_distribuida_http/
-├── docker-compose.yml          # Orquestração do RabbitMQ
-├── central.db                  # Banco de dados SQLite (criado automaticamente)
+├── docker-compose.yml          # Orquestração do serviço RabbitMQ
+├── central.db                  # Banco de dados SQLite (gerado automaticamente)
 ├── servico_coleta/             # API REST (FastAPI)
 │   ├── app.py
 │   └── requirements.txt
-├── servico_previsao/           # Consumidor RabbitMQ (cálculo de risco)
+├── servico_previsao/           # Consumidor RabbitMQ (cálculo preditivo de risco)
 │   ├── app.py
 │   └── requirements.txt
-└── dashboard/                  # Interface web (Streamlit)
+└── dashboard/                  # Interface Web (Streamlit)
     └── app.py
 
-Como executar:
+🚀 Como Executar o Projeto
+1. Clonar o Repositório e Aceder à Pasta
+git clone [https://github.com/Nangayikola/sistema_previsao_academica.git](https://github.com/Nangayikola/sistema_previsao_academica.git)
+cd sistema_previsao_academica/previsao_distribuida_http
 
-Clone o repositório: git clone https://github.com/Nangayikola/sistema_previsao_academica.git
+2. Iniciar o Broker de Mensagens (RabbitMQ)
+Certifique-se de que tem o Docker instalado e a executar:
+docker compose up -d
 
-Aceda à pasta do projeto: cd sistema_previsao_academica/previsao_distribuida_http
+3. Configurar os Ambientes Virtuais e Dependências
+Crie e ative o ambiente virtual para cada serviço antes de instalar as dependências de cada pasta (servico_coleta, servico_previsao e dashboard):
+# Exemplo de criação e instalação para um módulo:
+python -m venv venv
+source venv/bin/activate  # No Windows use: venv\Scripts\activate
+pip install -r requirements.txt
 
-Suba o RabbitMQ com Docker Compose: docker compose up -d
+4. Executar os Serviços
+4.1 Iniciar o Serviço de Previsão (Consumidor RabbitMQ):
+cd servico_previsao
+python app.py
 
-Crie e ative os ambientes virtuais para cada serviço (coleta, previsão e dashboard) e instale as dependências (consulte o README.md completo para os comandos detalhados).
+4.2 Iniciar o Serviço de Coleta (API FastAPI):
+cd servico_coleta
+uvicorn app:app --port 8000 --reload
 
-Inicie o serviço de previsão (consumidor): cd servico_previsao && python app.py
+4.3 Iniciar o Dashboard (Streamlit):
+cd dashboard
+streamlit run app.py
 
-Inicie o serviço de coleta (API): cd servico_coleta && uvicorn app:app --port 8000 --reload
+🤝 Como Contribuir
+Faça um Fork do projeto
 
-Inicie o dashboard: cd dashboard && streamlit run app.py
+1. Crie uma nova branch para a sua funcionalidade:
+git checkout -b minha-melhoria
 
-Acesse no navegador:
+2. Submeta as suas alterações (Commit):
+git commit -m "Adiciona nova funcionalidade"
 
-Dashboard: http://localhost:8501
+3. Envie para a sua branch (Push):
+git push origin minha-melhoria
 
-Documentação da API: http://localhost:8000/docs
+4. Abra um Pull Request
 
-RabbitMQ (gestão): http://localhost:15672 (user: guest, pass: guest)
-
-Como contribuir:
-
-Faça um fork do projeto
-
-Crie uma branch para sua alteração (git checkout -b minha-melhoria)
-
-Commit as mudanças (git commit -m "Adiciona nova funcionalidade")
-
-Faça push para a branch (git push origin minha-melhoria)
-
-Abra um pull request
-
-Desenvolvido por: Felisberto Nangayikola e Isabel Bota.
+👨‍💻 Autores & Desenvolvedores
+Desenvolvido por: Eng. Felisberto Nangayikola e Engª. Isabel Bota.

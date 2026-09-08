@@ -3,207 +3,212 @@ import sqlite3
 import pika
 import time
 import os
+import traceback
 from datetime import datetime
 
-# ---- Caminho absoluto para o ficheiro central.db na raiz do projeto ----
+# ============================================================================
+# CONFIGURAÇÕES E CAMINHO DO BANCO DE DADOS
+# ============================================================================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "central.db")
 print(f"📂 Serviço de Previsão a usar: {DB_PATH}")
 
 # ============================================================================
-# FUNÇÃO DE CÁLCULO DE RISCO (mantida)
+# ALGORITMO DE CÁLCULO DE DESEMPENHO E RECOMENDAÇÃO
 # ============================================================================
-def calcular_risco(notas: list, faltas: int = 0, total_aulas: int = 40):
-    """
-    Calcula o risco de reprovação com base nas notas e faltas.
-    Retorna: (risco, media_estimada, recomendacao_detalhada)
-    """
-    if not notas:
-        return ("alto", 0.0,
-                "⚠️ Sem notas registadas. Recomenda-se que o aluno comece a registar o seu desempenho "
-                "o mais rapidamente possível e procure apoio pedagógico para não ficar em situação de risco.")
+def analisar_desempenho_e_recomendar(
+    notas_obtidas, 
+    faltas_atuais, 
+    total_provas=3, 
+    max_faltas=15, 
+    media_aprovacao=10.0, 
+    media_recurso=7.0
+):
+    provas_realizadas = len(notas_obtidas)
+    provas_restantes = max(0, total_provas - provas_realizadas)
+    soma_atual = sum(notas_obtidas)
+    media_atual = round(soma_atual / provas_realizadas, 2) if provas_realizadas > 0 else 0.0
 
-    media = sum(notas) / len(notas)
-    perc_faltas = faltas / total_aulas if total_aulas > 0 else 0
+    percentual_faltas = (faltas_atuais / max_faltas) * 100 if max_faltas > 0 else 0
+    risco_faltas = "CRÍTICO" if faltas_atuais >= max_faltas else ("ALTO" if percentual_faltas >= 75 else "BAIXO")
 
-    if media < 5.0 or perc_faltas > 0.25:
-        risco = "alto"
-        recomendacao = (
-            f"🔴 **Risco Alto de Reprovação**\n\n"
-            f"📊 Média atual: {media:.2f} (abaixo do mínimo recomendado de 5.0)\n"
-            f"📅 Faltas: {faltas} ({perc_faltas*100:.1f}%) – ultrapassa o limite de 25%\n\n"
-            "### 🎯 Plano de Ação Imediato:\n"
-            "1. **Monitoria intensiva** – Inscreva-se nas monitorias da disciplina o mais rápido possível.\n"
-            "2. **Regularização de faltas** – Apresente justificativas para as faltas e procure compensar com trabalhos extras, se permitido.\n"
-            "3. **Plano de estudos diário** – Dedique pelo menos 2 horas por dia a esta disciplina, com foco nos tópicos com mais dificuldade.\n"
-            "4. **Revisão de conteúdos** – Revise os conteúdos das aulas anteriores, principalmente os que tiveram menor aproveitamento.\n"
-            "5. **Simulados e exercícios** – Resolva pelo menos 10 exercícios por semana para praticar.\n"
-            "6. **Agendamento com o professor** – Marque uma reunião com o docente para discutir as dificuldades específicas.\n"
-            "7. **Grupo de estudo** – Junte-se a um grupo de estudo com colegas para trocar conhecimentos.\n\n"
-            "⚠️ **Ação urgente**: A situação é crítica. Recomenda-se intervenção pedagógica imediata."
-        )
-        return risco, round(media, 2), recomendacao
+    pontos_necessarios = (media_aprovacao * total_provas) - soma_atual
+    nota_meta = round(pontos_necessarios / provas_restantes, 2) if provas_restantes > 0 else 0.0
 
-    if media < 6.5:
-        risco = "medio"
-        recomendacao = (
-            f"🟡 **Risco Médio de Reprovação**\n\n"
-            f"📊 Média atual: {media:.2f} (próxima do limite mínimo de 5.0)\n"
-            f"📅 Faltas: {faltas} ({perc_faltas*100:.1f}%) – dentro do limite, mas requer atenção\n\n"
-            "### 📌 Plano de Melhoria:\n"
-            "1. **Estudo extra semanal** – Adicione 4 horas de estudo suplementar à disciplina nas próximas 4 semanas.\n"
-            "2. **Exercícios práticos** – Resolva exercícios adicionais dos tópicos onde teve notas mais baixas.\n"
-            "3. **Acompanhamento com monitor** – Participe em pelo menos 2 sessões de monitoria por mês.\n"
-            "4. **Evitar faltas** – Mantenha a frequência regular para não agravar o risco.\n"
-            "5. **Autoavaliação** – Faça uma autoavaliação semanal para monitorizar o progresso.\n"
-            "6. **Material complementar** – Utilize livros ou vídeos recomendados pelo professor para reforçar a aprendizagem.\n\n"
-            "💡 **Dica**: Com dedicação extra, é possível melhorar o desempenho e evitar a reprovação."
-        )
-        return risco, round(media, 2), recomendacao
-
+    # Avaliação do Estado e Risco
+    if faltas_atuais > max_faltas:
+        previsao = "REPROVADO POR FALTAS"
+        nivel_risco = "ALTO"
+    elif provas_restantes == 0:
+        if media_atual >= media_aprovacao:
+            previsao = "APROVADO"
+            nivel_risco = "BAIXO"
+        elif media_atual >= media_recurso:
+            previsao = "EM EXAME / RECURSO"
+            nivel_risco = "MEDIO"
+        else:
+            previsao = "REPROVADO POR NOTA"
+            nivel_risco = "ALTO"
     else:
-        risco = "baixo"
-        recomendacao = (
-            f"🟢 **Risco Baixo de Reprovação**\n\n"
-            f"📊 Média atual: {media:.2f} (acima de 6.5)\n"
-            f"📅 Faltas: {faltas} ({perc_faltas*100:.1f}%) – excelente frequência\n\n"
-            "### ✅ Recomendações para Manter o Bom Desempenho:\n"
-            "1. **Mantenha o ritmo** – Continue com a mesma dedicação e disciplina.\n"
-            "2. **Aprofundamento** – Explore conteúdos avançados para solidificar o conhecimento.\n"
-            "3. **Partilha de conhecimento** – Ajude colegas com dificuldades – isso reforça a sua própria aprendizagem.\n"
-            "4. **Participação ativa** – Continue participando das aulas e tirando dúvidas.\n"
-            "5. **Revisão periódica** – Faça revisões semanais para não acumular matéria.\n"
-            "6. **Desafios extras** – Experimente resolver exercícios de níveis superiores para testar os limites do seu conhecimento.\n\n"
-            "🌟 **Parabéns!** Continue assim e aproveite para aprofundar os temas que mais lhe interessam."
-        )
-        return risco, round(media, 2), recomendacao
+        if nota_meta <= 0:
+            previsao = "APROVAÇÃO GARANTIDA"
+            nivel_risco = "BAIXO"
+        elif nota_meta <= 20.0:
+            previsao = "EM RISCO - APROVAÇÃO POSSÍVEL"
+            nivel_risco = "MEDIO" if nota_meta <= 12.0 else "ALTO"
+        else:
+            previsao = "ENCAMINHADO PARA RECURSO"
+            nivel_risco = "ALTO"
+
+    # Geração de Recomendações
+    recomendacoes = []
+    if risco_faltas == "CRÍTICO":
+        recomendacoes.append("⚠️ Limite de faltas atingido!")
+    elif risco_faltas == "ALTO":
+        recomendacoes.append(f"⚠️ Atenção: consumiu {percentual_faltas:.0f}% das faltas permitidas.")
+
+    if provas_restantes > 0 and nota_meta > 0:
+        if nota_meta <= 20.0:
+            recomendacoes.append(f"🎯 Meta: Média de {nota_meta} vls nas próximas {provas_restantes} prova(s).")
+        else:
+            recomendacoes.append("📌 Foco no Exame de Recurso (aprovação direta inviável).")
+
+    return {
+        "media_acumulada": media_atual,
+        "previsao": previsao,
+        "nivel_risco": nivel_risco,
+        "nota_meta": max(0.0, nota_meta) if provas_restantes > 0 else None,
+        "recomendacoes": json.dumps(recomendacoes, ensure_ascii=False)
+    }
 
 # ============================================================================
-# PROCESSAMENTO DA MENSAGEM
+# PROCESSAMENTO SÍNCRONO DA MENSAGEM
 # ============================================================================
 def processar_mensagem_sync(body):
     try:
         data = json.loads(body)
         aluno_id = data.get("aluno_id")
         matricula = data.get("matricula")
+        ano_letivo = data.get("ano_letivo")
         semestre = data.get("semestre")
         disciplinas = data.get("disciplinas", [])
-        print(f"📩 Processando {matricula} - semestre {semestre}")
+        print(f"📩 Processando {matricula} - {ano_letivo} - {semestre}")
 
-        if not aluno_id or not semestre or not disciplinas:
+        if not aluno_id or not ano_letivo or not semestre or not disciplinas:
             print("❌ Mensagem inválida: faltam campos obrigatórios")
             return
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # --- 1. Calcular previsões por disciplina ---
-        disciplinas_processadas = []
         total_notas = 0
         total_faltas = 0
         count_disciplinas = 0
         disciplinas_em_risco = 0
 
         for disc in disciplinas:
-            codigo = disc["codigo"]
-            # Busca o ID da disciplina
+            codigo = disc.get("codigo")
             cursor.execute("SELECT id FROM disciplinas WHERE codigo = ?", (codigo,))
             row_disc = cursor.fetchone()
             if not row_disc:
-                print(f"⚠️ Disciplina {codigo} não encontrada. A ignorar.")
+                print(f"⚠️ Disciplina {codigo} não encontrada no BD. A ignorar.")
                 continue
             disciplina_id = row_disc[0]
 
-            # Busca todas as notas do aluno na disciplina e semestre
-            cursor.execute("""
-                SELECT nota, faltas FROM notas
-                WHERE aluno_id = ? AND disciplina_id = ? AND semestre = ?
-                ORDER BY data_avaliacao
-            """, (aluno_id, disciplina_id, semestre))
-            rows = cursor.fetchall()
-            notas = [r[0] for r in rows]
-            faltas = rows[0][1] if rows else 0
-            media = sum(notas) / len(notas) if notas else 0
-            print(f"📊 {codigo}: notas={notas}, faltas={faltas}, média={media:.2f}")
+            p1 = disc.get("parcial1")
+            p2 = disc.get("parcial2")
+            exame = disc.get("exame")
+            faltas = disc.get("faltas", 0)
 
-            # Calcula risco individual
-            risco, media_est, recomendacao = calcular_risco(notas, faltas)
+            # 1. Persistir/Atualizar notas
+            cursor.execute("""
+                INSERT INTO notas (aluno_id, disciplina_id, parcial1, parcial2, exame, faltas, ano_letivo)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(aluno_id, disciplina_id, ano_letivo) DO UPDATE SET
+                    parcial1 = excluded.parcial1,
+                    parcial2 = excluded.parcial2,
+                    exame = excluded.exame,
+                    faltas = excluded.faltas
+            """, (aluno_id, disciplina_id, p1, p2, exame, faltas, ano_letivo))
+
+            # 2. Montar lista de notas obtidas para o algoritmo
+            notas_obtidas = [n for n in [p1, p2, exame] if n is not None]
+            
+            res = analisar_desempenho_e_recomendar(notas_obtidas, faltas)
             data_calculo = datetime.now().isoformat()
 
-            # Guarda a previsão individual
-            cursor.execute("""
-                INSERT OR REPLACE INTO previsoes
-                (aluno_id, disciplina_id, semestre, risco, media_estimada, recomendacao, data_calculo)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (aluno_id, disciplina_id, semestre, risco, media_est, recomendacao, data_calculo))
+            media_parcial = round((p1 + p2) / 2, 2) if (p1 is not None and p2 is not None) else None
+            media_final = res["media_acumulada"]
 
-            # Acumula para o agregado
-            total_notas += media
+            cursor.execute("""
+                INSERT INTO previsoes (aluno_id, disciplina_id, ano_letivo, media_parcial, media_final, risco, recomendacao, data_calculo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(aluno_id, disciplina_id, ano_letivo) DO UPDATE SET
+                    media_parcial = excluded.media_parcial,
+                    media_final = excluded.media_final,
+                    risco = excluded.risco,
+                    recomendacao = excluded.recomendacao,
+                    data_calculo = excluded.data_calculo
+            """, (aluno_id, disciplina_id, ano_letivo, media_parcial, media_final, res["nivel_risco"], res["recomendacoes"], data_calculo))
+
             total_faltas += faltas
-            count_disciplinas += 1
-            if risco in ("alto", "medio"):
+            if media_final is not None:
+                total_notas += media_final
+                count_disciplinas += 1
+            if res["nivel_risco"] in ("ALTO", "MEDIO"):
                 disciplinas_em_risco += 1
 
-            disciplinas_processadas.append(codigo)
-            print(f"✅ Previsão individual guardada para {matricula} - {codigo}: {risco}")
+            print(f"✅ Previsão para {matricula} - {codigo}: {res['previsao']} (Risco: {res['nivel_risco']})")
 
-        # --- 2. Calcular previsão agregada do semestre ---
+        # 3. Previsão agregada do semestre
         if count_disciplinas > 0:
-            media_global = total_notas / count_disciplinas
-            # Define risco global
+            media_global = round(total_notas / count_disciplinas, 2)
             if disciplinas_em_risco >= 2:
-                risco_global = "alto"
-                recomendacao_geral = (
-                    f"🔴 **Risco Global Alto** – {disciplinas_em_risco} disciplinas em risco.\n"
-                    "Recomenda-se intervenção imediata: priorize as disciplinas com risco alto, "
-                    "procure monitoria e reduza faltas. Consulte o plano de ação individual para cada disciplina."
-                )
+                risco_global = "ALTO"
+                recomendacao_geral = f"🔴 Risco Global Alto: {disciplinas_em_risco} disciplinas em risco. Priorize estudos e reduza faltas."
             elif disciplinas_em_risco == 1:
-                risco_global = "medio"
-                recomendacao_geral = (
-                    f"🟡 **Risco Global Médio** – 1 disciplina em risco.\n"
-                    "Dedique atenção extra a essa disciplina e mantenha o bom desempenho nas restantes. "
-                    "Evite faltas e acompanhe as monitorias disponíveis."
-                )
+                risco_global = "MEDIO"
+                recomendacao_geral = "🟡 Risco Global Médio: 1 disciplina em risco. Atenção reforçada necessária."
             else:
-                risco_global = "baixo"
-                recomendacao_geral = (
-                    f"🟢 **Risco Global Baixo** – Nenhuma disciplina em risco.\n"
-                    "Continue com o bom desempenho. Aproveite para aprofundar conhecimentos e ajudar colegas."
-                )
+                risco_global = "BAIXO"
+                recomendacao_geral = "🟢 Risco Global Baixo: Desempenho satisfatório em todas as disciplinas."
 
-            # Guarda previsão agregada
             cursor.execute("""
-                INSERT OR REPLACE INTO previsoes_semestre
-                (aluno_id, semestre, media_global, total_faltas, disciplinas_em_risco, risco_global, recomendacao_geral, data_calculo)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (aluno_id, semestre, round(media_global, 2), total_faltas, disciplinas_em_risco,
+                INSERT INTO previsoes_semestre 
+                (aluno_id, ano_letivo, semestre_nome, media_global, total_faltas, disciplinas_em_risco, risco_global, recomendacao_geral, data_calculo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(aluno_id, ano_letivo, semestre_nome) DO UPDATE SET
+                    media_global = excluded.media_global,
+                    total_faltas = excluded.total_faltas,
+                    disciplinas_em_risco = excluded.disciplinas_em_risco,
+                    risco_global = excluded.risco_global,
+                    recomendacao_geral = excluded.recomendacao_geral,
+                    data_calculo = excluded.data_calculo
+            """, (aluno_id, ano_letivo, semestre, media_global, total_faltas, disciplinas_em_risco,
                   risco_global, recomendacao_geral, datetime.now().isoformat()))
 
-            print(f"✅ Previsão agregada guardada para {matricula} - {semestre}: {risco_global}")
+            print(f"✅ Previsão agregada para {matricula} - {ano_letivo} - {semestre}: {risco_global}")
 
         conn.commit()
         conn.close()
-        print(f"✅ Processamento completo para {matricula} - {semestre}")
+        print(f"✅ Processamento concluído para {matricula}")
 
     except Exception as e:
-        print(f"❌ Erro ao processar: {e}")
-        import traceback
+        print(f"❌ Erro ao processar mensagem: {e}")
         traceback.print_exc()
 
 # ============================================================================
-# CONSUMIDOR RABBITMQ
+# CALLBACK E INICIALIZAÇÃO DO CONSUMIDOR RABBITMQ
 # ============================================================================
 def callback(ch, method, properties, body):
     print("📨 Mensagem recebida!")
     processar_mensagem_sync(body)
 
 def iniciar_consumidor():
-    # Verifica/cria tabelas necessárias
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Tabela de utilizadores (se não existir, mas já deve existir)
+    # Estrutura do Banco de Dados
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,76 +219,91 @@ def iniciar_consumidor():
             email TEXT UNIQUE
         )
     ''')
-
-    # Tabela de disciplinas
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS anos_academicos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT UNIQUE NOT NULL,
+            ativo INTEGER DEFAULT 1
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS semestres (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ano_academico_id INTEGER,
+            nome TEXT NOT NULL,
+            FOREIGN KEY(ano_academico_id) REFERENCES anos_academicos(id)
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS disciplinas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             codigo TEXT UNIQUE NOT NULL,
             nome TEXT NOT NULL,
-            semestre TEXT NOT NULL,
-            creditos INTEGER DEFAULT 0
+            semestre_id INTEGER,
+            creditos INTEGER DEFAULT 0,
+            FOREIGN KEY(semestre_id) REFERENCES semestres(id)
         )
     ''')
-
-    # Tabela de notas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS notas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             aluno_id INTEGER,
             disciplina_id INTEGER,
-            nota REAL,
+            parcial1 REAL,
+            parcial2 REAL,
+            exame REAL,
             faltas INTEGER DEFAULT 0,
-            semestre TEXT NOT NULL,
-            data_avaliacao TEXT,
+            ano_letivo TEXT NOT NULL,
             FOREIGN KEY(aluno_id) REFERENCES users(id),
-            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id)
+            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id),
+            UNIQUE(aluno_id, disciplina_id, ano_letivo)
         )
     ''')
-
-    # Tabela de previsões individuais
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS previsoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             aluno_id INTEGER,
             disciplina_id INTEGER,
-            semestre TEXT NOT NULL,
+            ano_letivo TEXT NOT NULL,
+            media_parcial REAL,
+            media_final REAL,
             risco TEXT,
-            media_estimada REAL,
             recomendacao TEXT,
             data_calculo TEXT,
             FOREIGN KEY(aluno_id) REFERENCES users(id),
-            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id)
+            FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id),
+            UNIQUE(aluno_id, disciplina_id, ano_letivo)
         )
     ''')
-
-    # Tabela de previsões agregadas por semestre
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS previsoes_semestre (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             aluno_id INTEGER,
-            semestre TEXT NOT NULL,
+            ano_letivo TEXT NOT NULL,
+            semestre_nome TEXT NOT NULL,
             media_global REAL,
             total_faltas INTEGER,
             disciplinas_em_risco INTEGER,
             risco_global TEXT,
             recomendacao_geral TEXT,
             data_calculo TEXT,
-            FOREIGN KEY(aluno_id) REFERENCES users(id)
+            FOREIGN KEY(aluno_id) REFERENCES users(id),
+            UNIQUE(aluno_id, ano_letivo, semestre_nome)
         )
     ''')
-
     conn.commit()
     conn.close()
     print(f"✅ Tabelas criadas/verificadas em {DB_PATH}")
 
-    # Loop de consumo com reconexão automática
-    RABBIT_HOST = "localhost"
+    RABBIT_HOST = os.getenv("RABBIT_HOST", "localhost")
+    RABBIT_PORT = int(os.getenv("RABBIT_PORT", 5679))
+
     while True:
         try:
-            print("🔗 A conectar ao RabbitMQ...")
+            print(f"🔗 A conectar ao RabbitMQ em {RABBIT_HOST}:{RABBIT_PORT}...")
             params = pika.ConnectionParameters(
                 host=RABBIT_HOST,
+                port=RABBIT_PORT,
                 heartbeat=60,
                 blocked_connection_timeout=300,
                 connection_attempts=10,
@@ -296,17 +316,15 @@ def iniciar_consumidor():
             print("🔮 Serviço de Previsão aguardando mensagens...")
             channel.start_consuming()
         except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError, pika.exceptions.StreamLostError) as e:
-            print(f"❌ Erro na conexão: {e}")
+            print(f"❌ Erro na conexão com RabbitMQ: {e}")
             print("🔄 A reconectar em 10 segundos...")
             time.sleep(10)
-            continue
         except KeyboardInterrupt:
-            print("👋 Encerrando...")
+            print("👋 Encerrando o serviço...")
             break
         except Exception as e:
             print(f"❌ Erro inesperado: {e}")
             time.sleep(10)
-            continue
 
 if __name__ == "__main__":
     iniciar_consumidor()
