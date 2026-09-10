@@ -9,6 +9,21 @@ O sistema oferece recomendações personalizadas de estudo e sugere áreas de ca
 
 Cada semestre é composto por 6 disciplinas, contando com previsão individualizada por disciplina e uma previsão global agregada para o semestre.
 
+## 🤖 Aprendizagem Automática
+
+O serviço de previsão treina automaticamente um `RandomForestClassifier` com os resultados completos existentes na tabela `notas`. O treino é executado antes do processamento de novas notas e usa:
+
+* média das avaliações;
+* faltas e número de avaliações realizadas;
+* desvio entre as notas e tendência de evolução;
+* disciplina e resultado final histórico.
+
+O modelo calcula a probabilidade de aprovação, que é combinada com os indicadores financeiros, participação, trabalhos de investigação e histórico do estudante. A probabilidade fica registada em `previsoes.probabilidade_aprovacao_ml` e aparece no boletim.
+
+Quando existem menos de 12 exemplos completos ou apenas uma classe de resultado, o sistema usa o fallback estatístico e informa essa condição. Assim, poucos dados não são tratados como um modelo confiável.
+
+O histórico da disciplina também é recalculado no momento da consulta do boletim. Isso permite comparar estudantes que cursaram a mesma disciplina, mesmo no mesmo ano letivo.
+
 ---
 
 ## 🛠️ Tecnologias Utilizadas
@@ -37,6 +52,9 @@ previsao_distribuida_http/
 │   └── requirements.txt
 └── dashboard/                  # Interface Web (Streamlit)
     └── app.py
+```
+
+O banco guarda ainda as métricas usadas para explicar cada previsão: `score_risco`, `taxa_aprovacao_historica`, `media_historica`, `amostras_historicas` e `probabilidade_aprovacao_ml`.
 
 🚀 Como Executar o Projeto
 1. Clonar o Repositório e Aceder à Pasta
@@ -66,6 +84,17 @@ uvicorn app:app --port 8000 --reload
 4.3 Iniciar o Dashboard (Streamlit):
 cd dashboard
 streamlit run app.py
+
+5. Verificar o estado da API
+GET http://localhost:8000/health
+
+Uma resposta com `"status": "ok"` confirma que a API e o banco estão acessíveis. O consumidor de previsão informa no terminal `Modelo ML: ativo` quando treinou com dados suficientes; caso contrário, informa `fallback`.
+
+## ⚠️ Limitações Atuais
+
+* A aprendizagem usa os resultados completos que já existem no banco; a qualidade melhora à medida que novos semestres são registados.
+* O modelo é retreinado em memória ao processar novas notas e não cria ainda um ficheiro versionado do modelo.
+* A previsão é apoio pedagógico e não substitui a decisão académica oficial.
 
 🤝 Como Contribuir
 Faça um Fork do projeto

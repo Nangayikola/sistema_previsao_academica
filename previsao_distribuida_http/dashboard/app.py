@@ -1,5 +1,6 @@
 # dashboard/app.py
 import io
+import json
 import requests
 import pandas as pd
 import streamlit as st
@@ -43,22 +44,38 @@ MAPA_DISCIPLINAS = {
 
 def obter_nome_disciplina(dados_d):
     """Retorna o nome completo e amigável da disciplina a partir do dicionário ou da API."""
-    nome = dados_d.get('disciplina_nome') or dados_d.get('nome') or dados_d.get('disciplina') or dados_d.get('nome_disciplina')
+    nome = (
+        dados_d.get('disciplina_nome')
+        or dados_d.get('disciplina')
+        or dados_d.get('nome')
+        or dados_d.get('nome_disciplina')
+    )
     codigo = str(dados_d.get('codigo') or dados_d.get('disciplina_codigo') or dados_d.get('cod') or "").strip()
 
-    # Tenta mapear diretamente pelo código limpo
-    if codigo in MAPA_DISCIPLINAS:
-        return MAPA_DISCIPLINAS[codigo]
+    # Normaliza para comparar com o dicionário de mapeamento.
+    nome_str = str(nome).strip() if nome is not None else ""
+    codigo_str = codigo.upper()
 
-    # Se 'nome' for na verdade apenas o código da disciplina (ex: "25I02")
-    if nome and str(nome).strip() in MAPA_DISCIPLINAS:
-        return MAPA_DISCIPLINAS[str(nome).strip()]
+    # Prefere o nome real da disciplina quando a API fornece ambos os campos.
+    if nome_str and nome_str not in {codigo_str, codigo}:
+        if nome_str.upper() in MAPA_DISCIPLINAS:
+            return MAPA_DISCIPLINAS[nome_str.upper()]
+        if codigo_str in MAPA_DISCIPLINAS:
+            return MAPA_DISCIPLINAS[codigo_str]
+        return nome_str
 
-    # Retorna o nome se for descritivo, caso contrário cai no código ou fallback
-    if nome and not str(nome).replace(" ", "").isalnum() and len(str(nome)) > 6:
-        return nome
+    # Se só existir código, tenta converter para nome amigável.
+    if codigo_str in MAPA_DISCIPLINAS:
+        return MAPA_DISCIPLINAS[codigo_str]
 
-    return nome if nome else (codigo if codigo else "Disciplina")
+    return nome_str if nome_str else (codigo if codigo else "Disciplina")
+
+
+def normalizar_semestre(valor):
+    if valor is None:
+        return "I"
+    texto = str(valor).strip().upper().replace(" SEMESTRE", "")
+    return "I" if texto in {"I", "1"} else "II" if texto in {"II", "2"} else "I"
 
 # ---- INJEÇÃO DE CSS GLASSMORPHISM ----
 st.markdown("""
@@ -172,6 +189,9 @@ def processar_dados_disciplina(d):
     p2 = float(d.get('parcial2', d.get('p2', 0.0)) or 0.0)
     exame = float(d.get('exame', 0.0) or 0.0)
     faltas = int(d.get('faltas', 0) or 0)
+    situacao_financeira = d.get('situacao_financeira') or 'Não informado'
+    participacao_atividades = d.get('participacao_atividades') or 'Não informado'
+    trabalhos_investigacao = d.get('trabalhos_investigacao') or 'Não informado'
     
     if d.get('media_final') not in [None, '-']:
         media = float(d['media_final'])
@@ -195,6 +215,11 @@ def processar_dados_disciplina(d):
         risco = str(risco).upper()
 
     rec = d.get('recomendacao')
+    if isinstance(rec, str):
+        try:
+            rec = " ".join(json.loads(rec))
+        except (json.JSONDecodeError, TypeError):
+            pass
     if not rec or rec == 'Sem recomendação':
         if risco == 'ALTO':
             if faltas >= 5:
@@ -212,9 +237,17 @@ def processar_dados_disciplina(d):
     d_proc['p2'] = p2
     d_proc['exame'] = exame
     d_proc['faltas'] = faltas
+    d_proc['situacao_financeira'] = situacao_financeira
+    d_proc['participacao_atividades'] = participacao_atividades
+    d_proc['trabalhos_investigacao'] = trabalhos_investigacao
     d_proc['media_final'] = media
     d_proc['risco'] = risco
     d_proc['recomendacao'] = rec
+    d_proc['score_risco'] = d.get('score_risco')
+    d_proc['taxa_aprovacao_historica'] = d.get('taxa_aprovacao_historica')
+    d_proc['media_historica'] = d.get('media_historica')
+    d_proc['amostras_historicas'] = int(d.get('amostras_historicas') or 0)
+    d_proc['probabilidade_aprovacao_ml'] = d.get('probabilidade_aprovacao_ml')
     return d_proc
 
 def processar_resumo_semestre(disciplinas):
@@ -268,11 +301,20 @@ def login(username, password):
         st.error(f"❌ Erro de conexão com a API: {e}")
         return False
 
-def register(username, password, role, nome, email=""):
+def register(username, password, role, nome, email="", curso_id=None, ano_curso=None, semestre=None, ano_letivo=None):
     try:
-        resp = requests.post(f"{API_BASE}/auth/register", json={
-            "username": username, "password": password, "role": role, "nome": nome, "email": email
-        }, timeout=10)
+        payload = {
+            "username": username,
+            "password": password,
+            "role": role,
+            "nome": nome,
+            "email": email,
+            "curso_id": curso_id,
+            "ano_curso": ano_curso,
+            "semestre": semestre,
+            "ano_letivo": ano_letivo,
+        }
+        resp = requests.post(f"{API_BASE}/auth/register", json=payload, timeout=10)
         if resp.status_code in (200, 201):
             st.success("✅ Conta criada com sucesso!")
             return True
@@ -310,7 +352,7 @@ def gerar_pdf_boletim(aluno_nome, ano_letivo, semestre, disciplinas, resumo):
     table_data = [[Paragraph(f"<b>{h}</b>", ParagraphStyle('H', parent=cell_bold, textColor=colors.whitesmoke)) for h in headers]]
 
     for d in disciplinas:
-        disc_nome = d['disciplina_nome']
+        disc_nome = d.get('disciplina_nome') or obter_nome_disciplina(d) or 'Disciplina'
         table_data.append([
             Paragraph(disc_nome, cell_bold),
             Paragraph(str(d['p1']), cell_style),
@@ -334,7 +376,7 @@ def gerar_pdf_boletim(aluno_nome, ano_letivo, semestre, disciplinas, resumo):
 
     elements.append(Paragraph("Diagnóstico Preditivo e Recomendações", section_heading))
     for d in disciplinas:
-        disc_nome = d['disciplina_nome']
+        disc_nome = d.get('disciplina_nome') or obter_nome_disciplina(d) or 'Disciplina'
         elements.append(Paragraph(f"• <b>{disc_nome}:</b> {d['recomendacao']}", cell_style))
 
     doc.build(elements)
@@ -342,6 +384,17 @@ def gerar_pdf_boletim(aluno_nome, ano_letivo, semestre, disciplinas, resumo):
     return buffer
 
 # ---- COMPONENTES DE INTERFACE ----
+def fetch_api_data(endpoint):
+    session = requests.Session()
+    if "token" in st.session_state:
+        session.headers.update({"Authorization": f"Bearer {st.session_state.token}"})
+    try:
+        resp = session.get(f"{API_BASE}/{endpoint}", timeout=5)
+        return resp.json() if resp.status_code == 200 else []
+    except Exception:
+        return []
+
+
 def render_header():
     st.markdown("""
     <div class="header">
@@ -391,8 +444,35 @@ def render_auth_page():
                 reg_email = st.text_input("Email")
                 reg_role = st.selectbox("Perfil", options=["estudante", "professor"])
                 reg_password = st.text_input("Palavra-passe", type="password")
+
+                cursos = fetch_api_data("cursos")
+                if reg_role == "estudante":
+                    curso_opts = {f"{c['nome']}": c['id'] for c in cursos}
+                    selected_curso_display = st.selectbox("Curso", options=list(curso_opts.keys()) or ["Selecionar curso"], index=0)
+                    reg_curso_id = curso_opts.get(selected_curso_display)
+                    anos = fetch_api_data(f"anos_curso/{reg_curso_id}") if reg_curso_id else []
+                    ano_values = [a['numero'] for a in anos] if anos else [1, 2, 3, 4]
+                    reg_ano_curso = st.selectbox("Ano", options=ano_values, index=0)
+                    reg_semestre = st.selectbox("Semestre", options=["I", "II"], index=0)
+                    reg_ano_letivo = st.text_input("Ano Letivo", value="2025-2026")
+                else:
+                    reg_curso_id = None
+                    reg_ano_curso = None
+                    reg_semestre = None
+                    reg_ano_letivo = None
+
                 if st.form_submit_button("✨ Registar", use_container_width=True):
-                    register(reg_username, reg_password, reg_role, reg_nome, reg_email)
+                    register(
+                        reg_username,
+                        reg_password,
+                        reg_role,
+                        reg_nome,
+                        reg_email,
+                        reg_curso_id,
+                        reg_ano_curso,
+                        reg_semestre,
+                        reg_ano_letivo,
+                    )
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---- DASHBOARD PRINCIPAL ----
@@ -420,12 +500,8 @@ def render_dashboard():
 
     # AUXILIAR PARA CONSULTAR API COM CACHE
     @st.cache_data(ttl=30)
-    def fetch_api_data(endpoint):
-        try:
-            resp = http.get(f"{API_BASE}/{endpoint}", timeout=5)
-            return resp.json() if resp.status_code == 200 else []
-        except Exception:
-            return []
+    def fetch_api_data_cached(endpoint):
+        return fetch_api_data(endpoint)
 
     # -------------------------------------------------------------
     # 1. PERFIL PROFESSOR: REGISTAR SEMESTRE E NOTAS
@@ -433,8 +509,8 @@ def render_dashboard():
     if menu == "📝 Registar Semestre":
         st.markdown('<div class="section-title">📝 Registar Semestre e Notas</div>', unsafe_allow_html=True)
 
-        cursos = fetch_api_data("cursos")
-        alunos = fetch_api_data("alunos")
+        cursos = fetch_api_data_cached("cursos")
+        alunos = fetch_api_data_cached("alunos")
 
         st.markdown('<div class="card-glass">', unsafe_allow_html=True)
         col_aluno, col_curso = st.columns(2)
@@ -442,42 +518,82 @@ def render_dashboard():
         with col_aluno:
             if alunos:
                 aluno_opts = {f"{a['nome']} ({a['username']})": a for a in alunos}
-                aluno_sel_name = st.selectbox("Aluno", options=list(aluno_opts.keys()))
-                aluno_obj = aluno_opts[aluno_sel_name]
-                matricula_aluno = aluno_obj['username']
+                aluno_sel_name = st.selectbox("Aluno", options=list(aluno_opts.keys()), index=0)
+                aluno_obj = aluno_opts.get(aluno_sel_name, {})
+                matricula_aluno = aluno_obj.get('username') or ""
             else:
                 matricula_aluno = st.text_input("Matrícula/Username do Aluno", value="aluno1")
+                aluno_obj = {}
 
         disciplinas_plano = []
         ano_num = 1
         semestre = "I"
+        curso_id = None
+        aluno_ano_letivo = "2025-2026"
 
-        with col_curso:
-            if cursos:
-                curso_opts = {f"{c['nome']}": c['id'] for c in cursos}
-                selected_curso_display = st.selectbox("Curso", options=list(curso_opts.keys()))
-                curso_id = curso_opts[selected_curso_display]
+        if aluno_obj:
+            curso_id = aluno_obj.get('curso_id')
+            ano_num = aluno_obj.get('ano_curso') or 1
+            semestre = aluno_obj.get('semestre') or "I"
+            aluno_ano_letivo = aluno_obj.get('ano_letivo') or "2025-2026"
 
-                anos = fetch_api_data(f"anos_curso/{curso_id}")
-                col_ano, col_sem = st.columns(2)
-                with col_ano:
-                    ano_num = st.selectbox("Ano", options=[a['numero'] for a in anos] if anos else [1, 2, 3, 4])
-                with col_sem:
-                    semestre = st.selectbox("Semestre", ["I", "II"])
+        if aluno_obj and (aluno_obj.get('curso_id') is None or aluno_obj.get('ano_curso') is None or not aluno_obj.get('semestre') or not aluno_obj.get('ano_letivo')):
+            st.warning("Este aluno ainda não tem curso, ano, semestre e ano académico registados. Refaça o registo do estudante com esses dados.")
 
-                disciplinas_plano = fetch_api_data(f"disciplinas_plano/{curso_id}/{ano_num}/{semestre}")
-            else:
-                col_ano, col_sem = st.columns(2)
-                with col_ano: ano_num = st.number_input("Ano Curricular", 1, 6, 1)
-                with col_sem: semestre = st.selectbox("Semestre", ["I", "II"])
+        st.markdown("### Dados do aluno carregados")
+        curso_nome = ""
+        if cursos and curso_id is not None:
+            curso_nome = next((c.get('nome', '') for c in cursos if c.get('id') == curso_id), "")
 
-        ano_letivo = st.text_input("Ano Letivo", value="2025-2026")
+        resumo_cols = st.columns(4)
+        with resumo_cols[0]:
+            st.text_input("Curso", value=curso_nome, disabled=True, key="curso_auto_prof")
+        with resumo_cols[1]:
+            ano_display = str(aluno_obj.get('ano_curso')) if aluno_obj and aluno_obj.get('ano_curso') is not None else str(ano_num)
+            st.text_input("Ano", value=ano_display, disabled=True, key="ano_auto_prof")
+        with resumo_cols[2]:
+            semestre_display = str(aluno_obj.get('semestre') or semestre)
+            st.text_input("Semestre", value=semestre_display, disabled=True, key="semestre_auto_prof")
+        with resumo_cols[3]:
+            ano_letivo_display = str(aluno_obj.get('ano_letivo') or aluno_ano_letivo)
+            st.text_input("Ano Académico", value=ano_letivo_display, disabled=True, key="ano_letivo_auto_prof")
+
+        if cursos and curso_id is not None:
+            disciplinas_plano = fetch_api_data_cached(f"disciplinas_plano/{curso_id}/{ano_num}/{semestre}")
+        ano_letivo = ano_letivo_display
+
         st.markdown("---")
 
         with st.form("form_insercao_notas"):
             st.markdown("#### 📚 Lançamento de Notas e Faltas")
             disciplinas_payload = []
             total_cards = len(disciplinas_plano) if disciplinas_plano else 5
+
+            st.markdown("#### Indicadores Complementares do Semestre")
+            ind_cols = st.columns(3)
+            with ind_cols[0]:
+                situacao_financeira = st.selectbox(
+                    "Situação Financeira",
+                    options=["Regular", "Em atraso", "Não informado"],
+                    index=0,
+                    key="fin_semestre",
+                )
+            with ind_cols[1]:
+                participacao_atividades = st.selectbox(
+                    "Participação nas atividades",
+                    options=["Alta", "Média", "Baixa", "Não informado"],
+                    index=1,
+                    key="part_semestre",
+                )
+            with ind_cols[2]:
+                trabalhos_investigacao = st.selectbox(
+                    "Trabalhos de investigação",
+                    options=["Feita", "Não feita", "Parcial", "Não informado"],
+                    index=0,
+                    key="trab_semestre",
+                )
+
+            st.markdown("---")
 
             for i in range(total_cards):
                 if disciplinas_plano and i < len(disciplinas_plano):
@@ -488,22 +604,28 @@ def render_dashboard():
                     nome_disciplina = f"Disciplina {i+1}"
                     codigo_disciplina = f"DISC_{i+1}"
 
-                with st.expander(f"📖 {nome_disciplina} ({codigo_disciplina})", expanded=(i == 0)):
+                with st.container():
+                    st.markdown(f"### 📘 {nome_disciplina} ({codigo_disciplina})")
                     if not disciplinas_plano:
                         codigo_disciplina = st.text_input(f"Código ({i+1})", value=f"DISC_{i+1}", key=f"cod_{i}")
-                    
+
+                    st.markdown("#### Notas")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1: p1 = st.number_input("Iª Parcial", 0.0, 20.0, value=10.0, step=0.5, key=f"p1_in_{i}")
                     with col2: p2 = st.number_input("IIª Parcial", 0.0, 20.0, value=10.0, step=0.5, key=f"p2_in_{i}")
                     with col3: exame = st.number_input("Exame", 0.0, 20.0, value=10.0, step=0.5, key=f"ex_in_{i}")
                     with col4: faltas = st.number_input("Faltas", 0, 100, value=2, step=1, key=f"f_in_{i}")
 
+                    st.markdown("---")
                     disciplinas_payload.append({
                         "disciplina_codigo": codigo_disciplina,
                         "parcial1": p1,
                         "parcial2": p2,
                         "exame": exame,
-                        "faltas": faltas
+                        "faltas": faltas,
+                        "situacao_financeira": situacao_financeira,
+                        "participacao_atividades": participacao_atividades,
+                        "trabalhos_investigacao": trabalhos_investigacao,
                     })
 
             submitted = st.form_submit_button("🚀 Enviar Notas para Previsão", use_container_width=True)
@@ -557,7 +679,7 @@ def render_dashboard():
         with c2:
             ano_letivo = st.text_input("Ano Letivo", value="2025-2026")
         with c3:
-            semestre = st.selectbox("Semestre", ["I SEMESTRE", "II SEMESTRE", "I", "II"])
+            semestre = normalizar_semestre(st.selectbox("Semestre", ["I", "II"], index=0, help="Filtra as disciplinas do semestre selecionado."))
 
         try:
             url = f"{API_BASE}/aluno/boletim/{ano_letivo}/{semestre}"
@@ -567,8 +689,25 @@ def render_dashboard():
             if resp.status_code == 200:
                 dados = resp.json()
                 raw_disciplinas = dados.get("disciplinas", [])
+                raw_disciplinas = [
+                    d for d in raw_disciplinas
+                    if normalizar_semestre(d.get("semestre") or d.get("semestre_nome") or semestre) == semestre
+                ]
                 disciplinas_proc = [processar_dados_disciplina(d) for d in raw_disciplinas]
                 resumo_real = processar_resumo_semestre(disciplinas_proc)
+                disciplinas_com_historico = sum(
+                    1 for d in disciplinas_proc if d.get('amostras_historicas', 0) > 0
+                )
+
+                st.caption(f"Mostrando disciplinas do {semestre}º semestre para {target_user}.")
+                if disciplinas_proc and disciplinas_com_historico == 0:
+                    st.info(
+                        "Ainda não há histórico comparável para estas disciplinas. "
+                        "A previsão atual usa as notas e indicadores do semestre; "
+                        "o componente histórico será ativado após existirem registos anteriores."
+                    )
+                if not disciplinas_proc:
+                    st.info(f"Não existem disciplinas registadas para o {semestre}º semestre neste ano letivo.")
 
                 # --- TABELA DE NOTAS ---
                 st.markdown('<div class="card-glass">', unsafe_allow_html=True)
@@ -582,7 +721,20 @@ def render_dashboard():
                         "P2": f"{d['p2']:.1f}",
                         "Exame": f"{d['exame']:.1f}" if d['exame'] > 0 else "-",
                         "Faltas": d['faltas'],
+                        "Situação Financeira": d.get('situacao_financeira', 'Não informado'),
+                        "Participação": d.get('participacao_atividades', 'Não informado'),
+                        "Trabalhos": d.get('trabalhos_investigacao', 'Não informado'),
                         "Média Final": f"{d['media_final']:.1f}",
+                        "Histórico": (
+                            f"{d['taxa_aprovacao_historica'] * 100:.0f}% aprovação / "
+                            f"média {d['media_historica']:.1f} ({d['amostras_historicas']} reg.)"
+                            if d.get('taxa_aprovacao_historica') is not None and d.get('media_historica') is not None
+                            else "Sem histórico"
+                        ),
+                        "Probabilidade ML": (
+                            f"{d['probabilidade_aprovacao_ml'] * 100:.0f}%"
+                            if d.get('probabilidade_aprovacao_ml') is not None else "Fallback"
+                        ),
                         "Estado / Risco": d['risco']
                     } for d in disciplinas_proc
                 ])
@@ -597,7 +749,12 @@ def render_dashboard():
                         "P2": st.column_config.TextColumn("P2", width="small"),
                         "Exame": st.column_config.TextColumn("Exame", width="small"),
                         "Faltas": st.column_config.NumberColumn("Faltas", width="small"),
+                        "Situação Financeira": st.column_config.TextColumn("Situação Financeira", width="small"),
+                        "Participação": st.column_config.TextColumn("Participação", width="small"),
+                        "Trabalhos": st.column_config.TextColumn("Trabalhos", width="small"),
                         "Média Final": st.column_config.TextColumn("Média Final", width="small"),
+                        "Histórico": st.column_config.TextColumn("Histórico", width="medium"),
+                        "Probabilidade ML": st.column_config.TextColumn("Probabilidade ML", width="small"),
                         "Estado / Risco": st.column_config.TextColumn("Estado / Risco", width="medium"),
                     }
                 )

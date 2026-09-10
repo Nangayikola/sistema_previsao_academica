@@ -2,3 +2,5 @@ sqlalchemy
 aiosqlite
 pika
 python-dotenv
+scikit-learn
+joblib

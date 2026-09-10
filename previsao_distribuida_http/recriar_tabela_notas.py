@@ -17,12 +17,17 @@ cursor.execute('''
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aluno_id INTEGER,
         disciplina_id INTEGER,
-        nota REAL,
+        parcial1 REAL,
+        parcial2 REAL,
+        exame REAL,
         faltas INTEGER DEFAULT 0,
-        semestre TEXT NOT NULL,
-        data_avaliacao TEXT,
+        situacao_financeira TEXT,
+        participacao_atividades TEXT,
+        trabalhos_investigacao TEXT,
+        ano_letivo TEXT NOT NULL,
         FOREIGN KEY(aluno_id) REFERENCES users(id),
-        FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id)
+        FOREIGN KEY(disciplina_id) REFERENCES disciplinas(id),
+        UNIQUE(aluno_id, disciplina_id, ano_letivo)
     )
 ''')
 conn.commit()

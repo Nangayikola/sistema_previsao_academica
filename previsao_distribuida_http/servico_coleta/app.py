@@ -18,6 +18,24 @@ load_dotenv()
 
 app = FastAPI(title="Serviço de Coleta de Dados Académicos")
 
+
+@app.get("/health")
+async def health_check():
+    """Expõe o estado básico da API e da base de dados para diagnóstico local."""
+    try:
+        async with AsyncSessionLocal() as session:
+            notas = await session.scalar(sa.text("SELECT COUNT(*) FROM notas"))
+            previsoes = await session.scalar(sa.text("SELECT COUNT(*) FROM previsoes"))
+        return {
+            "status": "ok",
+            "servico": "coleta",
+            "banco": "ok",
+            "notas": notas or 0,
+            "previsoes": previsoes or 0,
+        }
+    except Exception as exc:
+        return {"status": "degradado", "servico": "coleta", "banco": "indisponivel", "erro": str(exc)}
+
 # ============================================================================
 # CONFIGURAÇÕES E CHAVES DE SEGURANÇA
 # ============================================================================
@@ -45,6 +63,10 @@ class User(Base):
     role = sa.Column(sa.String, nullable=False)
     nome = sa.Column(sa.String, nullable=False)
     email = sa.Column(sa.String, unique=True, nullable=True)
+    curso_id = sa.Column(sa.Integer, nullable=True)
+    ano_curso = sa.Column(sa.Integer, nullable=True)
+    semestre = sa.Column(sa.String, nullable=True)
+    ano_letivo = sa.Column(sa.String, nullable=True)
 
 
 class AnoAcademico(Base):
@@ -81,6 +103,9 @@ class Nota(Base):
     parcial2 = sa.Column(sa.Float, nullable=True)
     exame = sa.Column(sa.Float, nullable=True)
     faltas = sa.Column(sa.Integer, default=0)
+    situacao_financeira = sa.Column(sa.String, nullable=True)
+    participacao_atividades = sa.Column(sa.String, nullable=True)
+    trabalhos_investigacao = sa.Column(sa.String, nullable=True)
     ano_letivo = sa.Column(sa.String, nullable=False)
 
 
@@ -95,6 +120,11 @@ class Previsao(Base):
     risco = sa.Column(sa.String)
     recomendacao = sa.Column(sa.Text)
     data_calculo = sa.Column(sa.String)
+    score_risco = sa.Column(sa.Float)
+    taxa_aprovacao_historica = sa.Column(sa.Float)
+    media_historica = sa.Column(sa.Float)
+    amostras_historicas = sa.Column(sa.Integer)
+    probabilidade_aprovacao_ml = sa.Column(sa.Float)
 
 
 class PrevisaoSemestre(Base):
@@ -129,6 +159,18 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await add_column_if_not_exists(engine, "previsoes_semestre", "data_calculo TEXT")
+    await add_column_if_not_exists(engine, "notas", "situacao_financeira TEXT")
+    await add_column_if_not_exists(engine, "notas", "participacao_atividades TEXT")
+    await add_column_if_not_exists(engine, "notas", "trabalhos_investigacao TEXT")
+    await add_column_if_not_exists(engine, "previsoes", "score_risco REAL")
+    await add_column_if_not_exists(engine, "previsoes", "taxa_aprovacao_historica REAL")
+    await add_column_if_not_exists(engine, "previsoes", "media_historica REAL")
+    await add_column_if_not_exists(engine, "previsoes", "amostras_historicas INTEGER")
+    await add_column_if_not_exists(engine, "previsoes", "probabilidade_aprovacao_ml REAL")
+    await add_column_if_not_exists(engine, "users", "curso_id INTEGER")
+    await add_column_if_not_exists(engine, "users", "ano_curso INTEGER")
+    await add_column_if_not_exists(engine, "users", "semestre TEXT")
+    await add_column_if_not_exists(engine, "users", "ano_letivo TEXT")
 
 
 # ============================================================================
@@ -177,6 +219,52 @@ async def get_current_professor(current_user: User = Depends(get_current_user)):
     return current_user
 
 
+async def resolver_nome_disciplina_por_codigo(
+    session: AsyncSession,
+    codigo: str,
+    curso_id: Optional[int] = None,
+    ano_curso: Optional[int] = None,
+    semestre: Optional[str] = None,
+) -> str:
+    codigo_limpo = (codigo or "").strip()
+    if not codigo_limpo:
+        return "Disciplina"
+
+    result_disc = await session.execute(sa.select(Disciplina).where(Disciplina.codigo == codigo_limpo))
+    disc = result_disc.scalar_one_or_none()
+    if disc and disc.nome and disc.nome.strip() and disc.nome.strip() != disc.codigo:
+        return disc.nome.strip()
+
+    if curso_id is not None and ano_curso is not None and semestre:
+        result_plano = await session.execute(
+            sa.text("""
+                SELECT dp.nome
+                FROM disciplinas_plano dp
+                JOIN semestres_curso sc ON dp.semestre_id = sc.id
+                JOIN anos_curso ac ON sc.ano_id = ac.id
+                WHERE ac.curso_id = :curso_id
+                  AND ac.numero = :ano_curso
+                  AND sc.nome = :semestre
+                  AND dp.codigo = :codigo
+                LIMIT 1
+            """),
+            {"curso_id": curso_id, "ano_curso": ano_curso, "semestre": semestre, "codigo": codigo_limpo},
+        )
+        nome_plano = result_plano.scalar_one_or_none()
+        if nome_plano and str(nome_plano).strip():
+            return str(nome_plano).strip()
+
+    result_plano = await session.execute(
+        sa.text("SELECT nome FROM disciplinas_plano WHERE codigo = :codigo LIMIT 1"),
+        {"codigo": codigo_limpo},
+    )
+    nome_plano = result_plano.scalar_one_or_none()
+    if nome_plano and str(nome_plano).strip():
+        return str(nome_plano).strip()
+
+    return codigo_limpo
+
+
 # ============================================================================
 # SCHEMAS DE ENTRADA (PYDANTIC)
 # ============================================================================
@@ -186,6 +274,10 @@ class RegisterRequest(BaseModel):
     role: str
     nome: str
     email: Optional[str] = None
+    curso_id: Optional[int] = None
+    ano_curso: Optional[int] = None
+    semestre: Optional[str] = None
+    ano_letivo: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -199,6 +291,9 @@ class NotaSemestreInput(BaseModel):
     parcial2: Optional[float] = None
     exame: Optional[float] = None
     faltas: int = 0
+    situacao_financeira: Optional[str] = None
+    participacao_atividades: Optional[str] = None
+    trabalhos_investigacao: Optional[str] = None
 
 
 class DadosSemestreAluno(BaseModel):
@@ -242,8 +337,23 @@ async def register(data: RegisterRequest):
         result = await session.execute(sa.select(User).where(User.username == data.username))
         if result.scalar_one_or_none():
             raise HTTPException(400, "Username já registado")
+
+        if data.role == "estudante":
+            if data.curso_id is None or data.ano_curso is None or not data.semestre or not data.ano_letivo:
+                raise HTTPException(400, "Estudantes devem indicar curso, ano, semestre e ano letivo.")
+
         hashed = hash_password(data.password)
-        user = User(username=data.username, password_hash=hashed, role=data.role, nome=data.nome, email=data.email)
+        user = User(
+            username=data.username,
+            password_hash=hashed,
+            role=data.role,
+            nome=data.nome,
+            email=data.email,
+            curso_id=data.curso_id,
+            ano_curso=data.ano_curso,
+            semestre=data.semestre,
+            ano_letivo=data.ano_letivo,
+        )
         session.add(user)
         await session.commit()
         return {"message": "Utilizador registado com sucesso"}
@@ -289,14 +399,24 @@ async def registar_semestre(dados: DadosSemestreAluno, professor: User = Depends
         disciplinas_evento = []
 
         for item in dados.disciplinas:
+            nome_disciplina = await resolver_nome_disciplina_por_codigo(
+                session,
+                item.disciplina_codigo,
+                aluno.curso_id,
+                aluno.ano_curso,
+                dados.semestre,
+            )
+
             result_disc = await session.execute(
                 sa.select(Disciplina).where(Disciplina.codigo == item.disciplina_codigo)
             )
             disc = result_disc.scalar_one_or_none()
             if not disc:
-                disc = Disciplina(codigo=item.disciplina_codigo, nome=item.disciplina_codigo, semestre_id=sem_obj.id)
+                disc = Disciplina(codigo=item.disciplina_codigo, nome=nome_disciplina, semestre_id=sem_obj.id)
                 session.add(disc)
                 await session.flush()
+            elif not disc.nome or disc.nome.strip() == disc.codigo or disc.nome.strip() == "":
+                disc.nome = nome_disciplina
 
             result_nota = await session.execute(
                 sa.select(Nota).where(
@@ -311,6 +431,9 @@ async def registar_semestre(dados: DadosSemestreAluno, professor: User = Depends
                 nota.parcial2 = item.parcial2
                 nota.exame = item.exame
                 nota.faltas = item.faltas
+                nota.situacao_financeira = item.situacao_financeira
+                nota.participacao_atividades = item.participacao_atividades
+                nota.trabalhos_investigacao = item.trabalhos_investigacao
             else:
                 nota = Nota(
                     aluno_id=aluno.id,
@@ -319,6 +442,9 @@ async def registar_semestre(dados: DadosSemestreAluno, professor: User = Depends
                     parcial2=item.parcial2,
                     exame=item.exame,
                     faltas=item.faltas,
+                    situacao_financeira=item.situacao_financeira,
+                    participacao_atividades=item.participacao_atividades,
+                    trabalhos_investigacao=item.trabalhos_investigacao,
                     ano_letivo=dados.ano_letivo,
                 )
                 session.add(nota)
@@ -329,7 +455,10 @@ async def registar_semestre(dados: DadosSemestreAluno, professor: User = Depends
                 "parcial1": item.parcial1,
                 "parcial2": item.parcial2,
                 "exame": item.exame,
-                "faltas": item.faltas
+                "faltas": item.faltas,
+                "situacao_financeira": item.situacao_financeira,
+                "participacao_atividades": item.participacao_atividades,
+                "trabalhos_investigacao": item.trabalhos_investigacao,
             })
 
         await session.commit()
@@ -354,6 +483,9 @@ async def boletim_semestre(
     current_user: User = Depends(get_current_user),
     matricula: Optional[str] = None,
 ):
+    semestre_normalizado = str(semestre).strip().upper().replace(" SEMESTRE", "")
+    semestre_normalizado = "I" if semestre_normalizado in {"I", "1"} else "II" if semestre_normalizado in {"II", "2"} else semestre_normalizado
+
     if current_user.role == "estudante":
         aluno_username = current_user.username
     else:
@@ -369,12 +501,24 @@ async def boletim_semestre(
         if not aluno:
             raise HTTPException(404, "Aluno não encontrado")
 
-        result_sem = await session.execute(
-            sa.select(Semestre).join(AnoAcademico).where(AnoAcademico.nome == ano_letivo, Semestre.nome == semestre)
+        result_plano = await session.execute(
+            sa.text("""
+                SELECT dp.codigo, dp.nome
+                FROM disciplinas_plano dp
+                JOIN semestres_curso sc ON dp.semestre_id = sc.id
+                JOIN anos_curso ac ON sc.ano_id = ac.id
+                WHERE ac.curso_id = :curso_id
+                  AND ac.numero = :ano_curso
+                  AND sc.nome = :semestre
+                ORDER BY dp.nome
+            """),
+            {"curso_id": aluno.curso_id, "ano_curso": aluno.ano_curso, "semestre": semestre_normalizado},
         )
-        sem_obj = result_sem.scalar_one_or_none()
-        if not sem_obj:
-            return {"ano_letivo": ano_letivo, "semestre": semestre, "disciplinas": [], "resumo": None}
+        plano = result_plano.mappings().all()
+        codigos_permitidos = [row["codigo"] for row in plano]
+
+        if not codigos_permitidos:
+            return {"ano_letivo": ano_letivo, "semestre": semestre_normalizado, "disciplinas": [], "resumo": None}
 
         rows = await session.execute(
             sa.select(Disciplina, Nota)
@@ -384,7 +528,8 @@ async def boletim_semestre(
                 & (Nota.aluno_id == aluno.id)
                 & (Nota.ano_letivo == ano_letivo),
             )
-            .where(Disciplina.semestre_id == sem_obj.id)
+            .where(Disciplina.codigo.in_(codigos_permitidos))
+            .order_by(Disciplina.nome)
         )
 
         disciplinas_data = []
@@ -395,7 +540,27 @@ async def boletim_semestre(
 
         for disc, nota in rows.all():
             if nota is None:
-                nota = Nota(parcial1=None, parcial2=None, exame=None, faltas=0)
+                nota = Nota(
+                    parcial1=None,
+                    parcial2=None,
+                    exame=None,
+                    faltas=0,
+                    situacao_financeira=None,
+                    participacao_atividades=None,
+                    trabalhos_investigacao=None,
+                )
+
+            nome_disciplina = disc.nome
+            if not nome_disciplina or str(nome_disciplina).strip() == "" or str(nome_disciplina).strip() == disc.codigo:
+                nome_disciplina = await resolver_nome_disciplina_por_codigo(
+                    session,
+                    disc.codigo,
+                    aluno.curso_id,
+                    aluno.ano_curso,
+                    semestre_normalizado,
+                )
+                if str(disc.nome).strip() != str(nome_disciplina).strip():
+                    disc.nome = nome_disciplina
             
             media_final = None
             if nota.parcial1 is not None and nota.parcial2 is not None and nota.exame is not None:
@@ -411,16 +576,51 @@ async def boletim_semestre(
             )
             previsao = result_previsao.scalars().first()
 
+            result_historico = await session.execute(
+                sa.text("""
+                    SELECT parcial1, parcial2, exame, faltas
+                    FROM notas
+                    WHERE disciplina_id = :disciplina_id
+                      AND NOT (aluno_id = :aluno_id AND ano_letivo = :ano_letivo)
+                """),
+                {
+                    "disciplina_id": disc.id,
+                    "aluno_id": aluno.id,
+                    "ano_letivo": ano_letivo,
+                },
+            )
+            historico = [row for row in result_historico.fetchall() if any(value is not None for value in row[:3])]
+            medias_historicas = []
+            aprovados_historicos = 0
+            for parcial1, parcial2, exame, faltas in historico:
+                notas_historicas = [value for value in (parcial1, parcial2, exame) if value is not None]
+                media_historica_atual = sum(notas_historicas) / len(notas_historicas)
+                medias_historicas.append(media_historica_atual)
+                if len(notas_historicas) == 3 and media_historica_atual >= 10 and (faltas or 0) <= 15:
+                    aprovados_historicos += 1
+
+            amostras_historicas = len(medias_historicas)
+            taxa_historica = aprovados_historicos / amostras_historicas if amostras_historicas else None
+            media_historica_atual = sum(medias_historicas) / amostras_historicas if amostras_historicas else None
+
             disciplinas_data.append({
                 "codigo": disc.codigo,
-                "disciplina": disc.nome,
+                "disciplina": nome_disciplina,
                 "parcial1": nota.parcial1,
                 "parcial2": nota.parcial2,
                 "exame": nota.exame,
                 "media_final": round(media_final, 2) if media_final is not None else None,
                 "faltas": nota.faltas,
+                "situacao_financeira": nota.situacao_financeira,
+                "participacao_atividades": nota.participacao_atividades,
+                "trabalhos_investigacao": nota.trabalhos_investigacao,
                 "risco": previsao.risco if previsao else None,
                 "recomendacao": previsao.recomendacao if previsao else None,
+                "score_risco": previsao.score_risco if previsao else None,
+                "taxa_aprovacao_historica": taxa_historica if taxa_historica is not None else (previsao.taxa_aprovacao_historica if previsao else None),
+                "media_historica": media_historica_atual if media_historica_atual is not None else (previsao.media_historica if previsao else None),
+                "amostras_historicas": amostras_historicas or (previsao.amostras_historicas if previsao else 0),
+                "probabilidade_aprovacao_ml": previsao.probabilidade_aprovacao_ml if previsao else None,
             })
 
             if media_final is not None:
@@ -463,7 +663,18 @@ async def listar_alunos(current_user: User = Depends(get_current_user)):
     async with AsyncSessionLocal() as session:
         result = await session.execute(sa.select(User).where(User.role == "estudante"))
         alunos = result.scalars().all()
-        return [{"id": a.id, "username": a.username, "nome": a.nome} for a in alunos]
+        return [
+            {
+                "id": a.id,
+                "username": a.username,
+                "nome": a.nome,
+                "curso_id": a.curso_id,
+                "ano_curso": a.ano_curso,
+                "semestre": a.semestre,
+                "ano_letivo": a.ano_letivo,
+            }
+            for a in alunos
+        ]
 
 
 @app.get("/disciplinas")
@@ -483,7 +694,7 @@ async def listar_anos(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/cursos")
-async def listar_cursos(current_user: User = Depends(get_current_user)):
+async def listar_cursos():
     async with AsyncSessionLocal() as session:
         result = await session.execute(sa.text("SELECT id, nome, duracao_anos, area FROM cursos ORDER BY area, nome"))
         cursos = result.mappings().all()
@@ -491,7 +702,7 @@ async def listar_cursos(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/anos_curso/{curso_id}")
-async def listar_anos_curso(curso_id: int, current_user: User = Depends(get_current_user)):
+async def listar_anos_curso(curso_id: int):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             sa.text("SELECT numero FROM anos_curso WHERE curso_id = :curso_id ORDER BY numero"),
